@@ -179,7 +179,8 @@ def verify_election(electionid):
 @click.option('--electionid', default=None)
 @click.option('--qnum', default=0)
 @click.option('--randfile', default=None)
-def tally_stv_election(electionid, qnum, randfile):
+@click.option('--seats', default=1)
+def tally_stv_election(electionid, qnum, randfile, numseats):
 	election = Election.get_by_id(electionid)
 	
 	with open(randfile, 'r') as f:
@@ -188,7 +189,7 @@ def tally_stv_election(electionid, qnum, randfile):
 		election_id=election._id,
 		q_num=qnum,
 		random=dat,
-		num_seats=7,
+		num_seats=numseats,
 		status=TaskStatus.READY,
 		run_strategy=EosObject.lookup(app.config['TASK_RUN_STRATEGY'])()
 	)
@@ -214,7 +215,26 @@ def tick_scheduler():
 
 @app.route('/')
 def index():
-	return flask.render_template('index.html')
+	elections = Election.get_all()
+	elections.sort(key=lambda e: e.name)
+	
+	elections_open = [e for e in elections if e.workflow.get_task('eos.base.workflow.TaskCloseVoting').status == WorkflowTaskStatus.READY]
+	
+	elections_soon = [e for e in elections if e.workflow.get_task('eos.base.workflow.TaskOpenVoting').status != WorkflowTaskStatus.EXITED and e.workflow.get_task('eos.base.workflow.TaskOpenVoting').get_entry_task()]
+	elections_soon.sort(key=lambda e: e.workflow.get_task('eos.base.workflow.TaskOpenVoting').get_entry_task().run_at)
+	
+	elections_closed = [e for e in elections if e.workflow.get_task('eos.base.workflow.TaskCloseVoting').status == WorkflowTaskStatus.EXITED]
+	elections_closed.sort(key=lambda e: e.workflow.get_task('eos.base.workflow.TaskCloseVoting').exited_at, reverse=True)
+	elections_closed = elections_closed[:5]
+	
+	return flask.render_template('index.html', elections_open=elections_open, elections_soon=elections_soon, elections_closed=elections_closed)
+
+@app.route('/elections')
+def elections():
+	elections = Election.get_all()
+	elections.sort(key=lambda e: e.name)
+	
+	return flask.render_template('elections.html', elections=elections)
 
 def using_election(func):
 	@functools.wraps(func)
@@ -428,13 +448,21 @@ def email_login():
 def email_authenticate():
 	user = None
 	
-	for election in Election.get_all():
-		for voter in election.voters:
-			if isinstance(voter.user, EmailUser):
-				if voter.user.email.lower() == flask.request.form['email'].lower():
-					if voter.user.password == flask.request.form['password']:
-						user = voter.user
-						break
+	for u in app.config['ADMINS']:
+		if isinstance(u, EmailUser):
+			if u.email.lower() == flask.request.form['email'].lower():
+				if u.password == flask.request.form['password']:
+					user = u
+					break
+	
+	if user is None:
+		for election in Election.get_all():
+			for voter in election.voters:
+				if isinstance(voter.user, EmailUser):
+					if voter.user.email.lower() == flask.request.form['email'].lower():
+						if voter.user.password == flask.request.form['password']:
+							user = voter.user
+							break
 	
 	if user is None:
 		return flask.render_template('auth/email/login.html', error='The email or password you entered was invalid. Please check your details and try again. If the issue persists, contact the election administrator.')
